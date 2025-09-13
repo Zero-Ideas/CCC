@@ -8,6 +8,215 @@ from matplotlib.animation import FuncAnimation
 from sklearn.cluster import KMeans
 import threading
 import queue
+import os
+
+
+def parse_tsp_file(filepath):
+    """
+    Parse a .tsp file and extract the coordinate points.
+    Supports standard TSP file formats including EUC_2D, EXPLICIT, and others.
+
+    Args:
+        filepath: Path to the .tsp file
+
+    Returns:
+        tuple: (points, metadata) where points is list of (x, y) tuples and metadata contains file info
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"TSP file not found: {filepath}")
+
+    points = []
+    metadata = {
+        'name': '',
+        'comment': '',
+        'type': '',
+        'dimension': 0,
+        'edge_weight_type': '',
+        'node_coord_type': '',
+        'display_data_type': '',
+        'filepath': filepath
+    }
+
+    with open(filepath, 'r') as file:
+        lines = file.readlines()
+
+    reading_coords = False
+    reading_edge_weights = False
+    coord_section_started = False
+
+    for line_num, line in enumerate(lines):
+        line = line.strip()
+
+        if not line or line.startswith('%'):
+            continue
+
+        # Parse header information
+        if ':' in line and not coord_section_started:
+            key, value = line.split(':', 1)
+            key = key.strip().upper()
+            value = value.strip()
+
+            if key == 'NAME':
+                metadata['name'] = value
+            elif key == 'COMMENT':
+                metadata['comment'] = value
+            elif key == 'TYPE':
+                metadata['type'] = value
+            elif key == 'DIMENSION':
+                metadata['dimension'] = int(value)
+            elif key == 'EDGE_WEIGHT_TYPE':
+                metadata['edge_weight_type'] = value
+            elif key == 'NODE_COORD_TYPE':
+                metadata['node_coord_type'] = value
+            elif key == 'DISPLAY_DATA_TYPE':
+                metadata['display_data_type'] = value
+
+        # Start of coordinate section
+        elif line.upper() == 'NODE_COORD_SECTION':
+            reading_coords = True
+            coord_section_started = True
+            print(f"Reading coordinates from {metadata['name']} ({metadata['dimension']} points)...")
+
+        # Start of edge weight section (for explicit distance matrices)
+        elif line.upper() == 'EDGE_WEIGHT_SECTION':
+            reading_edge_weights = True
+            coord_section_started = True
+            print(f"Warning: EDGE_WEIGHT_SECTION found - explicit distance matrices not fully supported")
+
+        # End of data sections
+        elif line.upper() == 'EOF':
+            break
+
+        # Read coordinate data
+        elif reading_coords and not line.upper().startswith(('EDGE_WEIGHT_SECTION', 'EOF')):
+            try:
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Standard format: node_id x y
+                    node_id = int(parts[0])
+                    x = float(parts[1])
+                    y = float(parts[2])
+                    points.append((x, y))
+                elif len(parts) == 2:
+                    # Simple format: x y
+                    x = float(parts[0])
+                    y = float(parts[1])
+                    points.append((x, y))
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Could not parse coordinate line {line_num + 1}: {line} - {e}")
+
+    # Validate parsed data
+    if not points:
+        raise ValueError(f"No coordinate points found in TSP file: {filepath}")
+
+    if metadata['dimension'] > 0 and len(points) != metadata['dimension']:
+        print(f"Warning: Found {len(points)} points but dimension is {metadata['dimension']}")
+
+    # Update dimension if it wasn't specified
+    if metadata['dimension'] == 0:
+        metadata['dimension'] = len(points)
+
+    print(f"Successfully parsed TSP file: {len(points)} points from {metadata['name']}")
+    return points, metadata
+
+
+def normalize_tsp_coordinates(points, target_area_size=25):
+    """
+    Normalize TSP coordinates to fit within a target area size.
+    This helps with visualization and ensures consistent solver behavior.
+
+    Args:
+        points: List of (x, y) coordinate tuples
+        target_area_size: Target area size (default: 25x25)
+
+    Returns:
+        list: Normalized points that fit within target_area_size x target_area_size
+    """
+    if not points:
+        return points
+
+    # Find bounding box
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    # Calculate scaling factors
+    width = max_x - min_x
+    height = max_y - min_y
+
+    if width == 0 or height == 0:
+        return points
+
+    # Scale to fit within target area while maintaining aspect ratio
+    scale = min(target_area_size / width, target_area_size / height)
+
+    # Normalize coordinates
+    normalized_points = []
+    for x, y in points:
+        # Translate to origin, scale, then translate to center of target area
+        normalized_x = (x - min_x) * scale
+        normalized_y = (y - min_y) * scale
+        normalized_points.append((normalized_x, normalized_y))
+
+    return normalized_points
+
+
+def load_and_solve_tsp_file(filepath, visualize=True, normalize_coords=True, target_area_size=25):
+    """
+    Load a TSP file and solve it using the enhanced spatial subdivision solver.
+
+    Args:
+        filepath: Path to the .tsp file
+        visualize: Whether to show visualization
+        normalize_coords: Whether to normalize coordinates to target area size
+        target_area_size: Target area size for normalization
+
+    Returns:
+        dict: Solver results including performance metrics and metadata
+    """
+    print(f"\n=== Loading and Solving TSP File ===")
+    print(f"File: {filepath}")
+
+    try:
+        # Parse the TSP file
+        points, metadata = parse_tsp_file(filepath)
+
+        # Normalize coordinates if requested
+        if normalize_coords:
+            original_bounds = {
+                'min_x': min(p[0] for p in points),
+                'max_x': max(p[0] for p in points),
+                'min_y': min(p[1] for p in points),
+                'max_y': max(p[1] for p in points)
+            }
+            points = normalize_tsp_coordinates(points, target_area_size)
+            print(f"Coordinates normalized from {original_bounds} to ~{target_area_size}x{target_area_size}")
+
+        # Solve using the enhanced spatial subdivision solver
+        start_time = time.time()
+        result = advanced_tsp_solver(points, visualize=visualize, use_all_optimizations=True, real_time_viz=False)
+        total_time = time.time() - start_time
+
+        # Add TSP file metadata to results
+        result['tsp_metadata'] = metadata
+        result['original_bounds'] = original_bounds if normalize_coords else None
+        result['normalized'] = normalize_coords
+        result['file_load_time'] = total_time - result['solve_time']
+
+        print(f"\n=== TSP File Solution Results ===")
+        print(f"File: {metadata['name']} ({metadata.get('comment', 'No comment')})")
+        print(f"Points: {len(points)}")
+        print(f"Final cost: {result['cost']:.2f}")
+        print(f"Solve time: {result['solve_time']:.3f}s")
+        print(f"Total time (including file I/O): {total_time:.3f}s")
+        print(f"Final clusters: {result['num_clusters']}")
+
+        return result
+
+    except Exception as e:
+        print(f"Error loading/solving TSP file: {e}")
+        raise
 
 
 def calculate_optimal_subdivision(points, max_nodes_per_sector=250):
@@ -219,8 +428,8 @@ def enhanced_spatial_clustering_with_optimization(points, max_nodes_per_sector=2
                 import time
                 sector_start_time = time.time()
 
-                print(f"  Applying sector-level or-opt optimization to {len(sector)} points...")
-                optimized_clusters = optimize_sector_clusters(points, sector, sector_clusters)
+                print(f"  Applying comprehensive sector optimization to {len(sector)} points...")
+                optimized_clusters, sector_route_info = optimize_sector_clusters(points, sector, sector_clusters)
 
                 sector_time = time.time() - sector_start_time
                 sector_optimization_info['sector_times'].append(sector_time)
@@ -229,6 +438,12 @@ def enhanced_spatial_clustering_with_optimization(points, max_nodes_per_sector=2
                 # Replace the last added clusters with optimized ones
                 final_clusters = final_clusters[:-len(sector_clusters)]
                 final_clusters.extend(optimized_clusters)
+
+                # Store sector route info for potential inter-sector optimization
+                if sector_route_info:
+                    if 'sector_routes' not in sector_optimization_info:
+                        sector_optimization_info['sector_routes'] = {}
+                    sector_optimization_info['sector_routes'][i] = sector_route_info
 
                 print(f"  Sector {i+1} optimization completed in {sector_time:.3f}s")
             else:
@@ -260,8 +475,8 @@ def enhanced_spatial_clustering(points, max_nodes_per_sector=250, max_cluster_si
 
 def optimize_sector_clusters(points, sector_indices, sector_clusters):
     """
-    Apply comprehensive optimization within a single sector including 2-opt + Lin-Kernighan.
-    This creates a local TSP solution for the sector and optimizes it thoroughly.
+    Apply comprehensive optimization within a single sector including stages 5 and 7.
+    This creates a complete local TSP solution for the sector.
 
     Args:
         points: Full list of points
@@ -269,10 +484,10 @@ def optimize_sector_clusters(points, sector_indices, sector_clusters):
         sector_clusters: List of clusters within this sector
 
     Returns:
-        list: Optimized clusters for this sector
+        tuple: (optimized_clusters, sector_route_info) where sector_route_info contains the solved route details
     """
     if len(sector_clusters) <= 1 or len(sector_indices) < 10:
-        return sector_clusters
+        return sector_clusters, None
 
     try:
         # Create a local TSP problem for this sector
@@ -294,11 +509,26 @@ def optimize_sector_clusters(points, sector_indices, sector_clusters):
                 local_clusters.append(local_cluster)
 
         if len(local_clusters) <= 2:
-            return sector_clusters
+            return sector_clusters, None
 
         print(f"    Comprehensive sector optimization: {len(local_clusters)} clusters, {len(sector_indices)} points")
 
+        # STAGE 5 (Sector-level): Enhanced sub-clustering within this sector
+        print(f"    Stage 5 (Sector): Enhanced sub-clustering...")
+        enhanced_local_clusters = []
+        for cluster in local_clusters:
+            if len(cluster) > 8:  # Only sub-cluster large clusters
+                from TSP import adaptive_subcluster
+                subclusters = adaptive_subcluster(sector_points, cluster, max_size=6, depth=0, max_depth=2)
+                enhanced_local_clusters.extend(subclusters)
+            else:
+                enhanced_local_clusters.append(cluster)
+
+        print(f"    Sub-clustering: {len(local_clusters)} -> {len(enhanced_local_clusters)} clusters")
+        local_clusters = enhanced_local_clusters
+
         # Step 1: Quick cluster ordering based on centroids
+        print(f"    Stage 6 (Sector): Optimizing cluster order...")
         centroids = []
         for cluster in local_clusters:
             if cluster:
@@ -308,13 +538,26 @@ def optimize_sector_clusters(points, sector_indices, sector_clusters):
             else:
                 centroids.append((0, 0))
 
-        # Simple nearest neighbor ordering for clusters
-        cluster_order = nearest_neighbor_cluster_order(centroids)
+        # Use appropriate cluster ordering method
+        if len(centroids) <= 8:
+            from TSP import solve_cluster_order
+            cluster_order, _ = solve_cluster_order(centroids)
+        else:
+            cluster_order = nearest_neighbor_cluster_order(centroids)
+
         ordered_local_clusters = [local_clusters[i] for i in cluster_order]
 
-        # Step 2: Build a complete sector route using cluster path solving
-        print(f"    Building sector route...")
-        sector_route = build_complete_sector_route(sector_points, sector_D, ordered_local_clusters)
+        # STAGE 7 (Sector-level): Finding optimal entries and exits within sector
+        print(f"    Stage 7 (Sector): Solving entry/exit points...")
+        sector_best_cost, sector_seq = choose_entries_exits_sector(
+            sector_points, sector_D, ordered_local_clusters, Kcand=2  # Reduced Kcand for performance
+        )
+
+        # Build the complete sector route from the sequence
+        from TSP import stitch_full_route
+        sector_route = stitch_full_route(sector_seq)
+
+        print(f"    Initial sector route cost: {sector_best_cost:.2f}")
 
         if len(sector_route) > 3:
             # Step 3: Apply Enhanced 2-opt + Lin-Kernighan at SECTOR level
@@ -333,21 +576,28 @@ def optimize_sector_clusters(points, sector_indices, sector_clusters):
             final_cost, sector_route = or_opt_optimization_fast(
                 sector_D, sector_route, max_segment_length=2, max_iterations=2
             )
+            print(f"    Final sector route cost: {final_cost:.2f}")
 
-        # Step 5: Convert optimized route back to clusters
-        # For simplicity, we'll maintain the original cluster structure but with optimized ordering
-        # In practice, you might want to re-cluster based on the optimized route
+        # Step 5: Convert back to original indices and return enhanced clusters
         optimized_clusters = []
         for local_cluster in ordered_local_clusters:
             orig_cluster = [sector_to_original[local_idx] for local_idx in local_cluster]
             optimized_clusters.append(orig_cluster)
 
+        # Create sector route info for inter-sector connections
+        sector_route_info = {
+            'route': [sector_to_original[local_idx] for local_idx in sector_route],
+            'cost': final_cost if 'final_cost' in locals() else sector_best_cost,
+            'entry_point': sector_to_original[sector_route[0]] if sector_route else None,
+            'exit_point': sector_to_original[sector_route[-1]] if sector_route else None
+        }
+
         print(f"    Sector optimization complete")
-        return optimized_clusters
+        return optimized_clusters, sector_route_info
 
     except Exception as e:
         print(f"    Warning: Sector optimization failed: {e}, using original clusters")
-        return sector_clusters
+        return sector_clusters, None
 
 
 def build_complete_sector_route(sector_points, sector_D, ordered_clusters):
@@ -537,6 +787,98 @@ def calculate_cluster_relocation_delta(sector_points, sector_D, clusters, from_p
 
     except:
         return 0  # Return 0 if calculation fails
+
+
+def choose_entries_exits_sector(sector_points, sector_D, clusters, Kcand=3):
+    """
+    Optimized entry/exit point selection for sector-level solving with reduced scaling harshness.
+    This is a lightweight version of choose_entries_exits specifically for sectors.
+
+    Args:
+        sector_points: Points in this sector (local indices)
+        sector_D: Distance matrix for sector points
+        clusters: List of clusters within the sector (local indices)
+        Kcand: Number of candidate boundary nodes (reduced for performance)
+
+    Returns:
+        tuple: (best_cost, sequence) for the sector
+    """
+    if len(clusters) <= 1:
+        if clusters and len(clusters[0]) > 0:
+            return 0.0, [(0, clusters[0][0], clusters[0][-1], clusters[0])]
+        return 0.0, []
+
+    # Generate lightweight candidates for each cluster
+    from TSP import candidate_boundary_nodes
+
+    candidates = {}
+    for ci in range(len(clusters)):
+        cidxs = clusters[ci]
+        # Use smaller K for faster performance
+        candidates[ci] = candidate_boundary_nodes(sector_points, cidxs, K=min(Kcand, 2))
+        if len(candidates[ci]) == 0:
+            candidates[ci] = [cidxs[0]]
+
+    # Simplified intra-cluster path computation (faster than full DP)
+    intra = {}
+    for ci in range(len(clusters)):
+        intra[ci] = {}
+        idxs = clusters[ci]
+
+        for a in candidates[ci]:
+            for b in candidates[ci]:
+                if a == b and len(idxs) > 1:
+                    intra[ci][(a,b)] = (float('inf'), None)
+                    continue
+
+                # Use fast path computation for sector-level
+                from TSP import greedy_path_between_fast
+                cost, path = greedy_path_between_fast(idxs, a, b, sector_D)
+                intra[ci][(a,b)] = (cost, path)
+
+    # Simplified DP (faster than full version)
+    order = list(range(len(clusters)))  # Simple sequential order
+    dp = [{} for _ in order]
+    parent = [{} for _ in order]
+
+    for pos, ci in enumerate(order):
+        if pos == 0:
+            for (a,b), (cst, path) in intra[ci].items():
+                dp[pos][b] = cst
+                parent[pos][b] = (None, a)
+        else:
+            for (a,b), (cst, path) in intra[ci].items():
+                best = float('inf')
+                bestprev = None
+                for prev_exit, prev_cost in dp[pos-1].items():
+                    inter = sector_D[prev_exit][a]
+                    tot = prev_cost + inter + cst
+                    if tot < best:
+                        best = tot
+                        bestprev = prev_exit
+                if best < float('inf'):
+                    if b not in dp[pos] or best < dp[pos][b]:
+                        dp[pos][b] = best
+                        parent[pos][b] = (bestprev, a)
+
+    # Reconstruct solution
+    last_pos = len(order) - 1
+    if not dp[last_pos]:
+        return float('inf'), []
+
+    best_exit = min(dp[last_pos], key=lambda x: dp[last_pos][x])
+    best_cost = dp[last_pos][best_exit]
+
+    seq = []
+    cur_exit = best_exit
+    for pos in range(last_pos, -1, -1):
+        prev_exit, entry = parent[pos][cur_exit]
+        ci = order[pos]
+        seq.append((ci, entry, cur_exit, intra[ci][(entry, cur_exit)][1]))
+        cur_exit = prev_exit
+
+    seq = list(reversed(seq))
+    return best_cost, seq
 
 
 def euclid(a,b):
@@ -1538,8 +1880,46 @@ def smart_cluster_path_with_ml(points, D, idxs, start_idx, end_idx, ml_predictor
 
     return cost, path
 
-def advanced_tsp_solver(points, visualize=True, use_all_optimizations=True, real_time_viz=True):
-    """Most advanced TSP solver with all optimizations enabled"""
+def advanced_tsp_solver(points=None, visualize=True, use_all_optimizations=True, real_time_viz=True, File=None, normalize_coords=True, target_area_size=25):
+    """
+    Most advanced TSP solver with all optimizations enabled.
+    Can solve from points or load from a .tsp file.
+
+    Args:
+        points: List of (x, y) coordinate tuples (ignored if File is specified)
+        visualize: Whether to show visualization
+        use_all_optimizations: Whether to use all optimization techniques
+        real_time_viz: Whether to show real-time visualization updates
+        File: Path to .tsp file to load and solve (overrides points parameter)
+        normalize_coords: Whether to normalize coordinates when loading from file
+        target_area_size: Target area size for coordinate normalization
+
+    Returns:
+        dict: Solver results including performance metrics
+    """
+    # Handle file loading if File parameter is specified
+    if File is not None:
+        print(f"File parameter specified: {File}")
+        if not points:
+            # Load from file
+            return load_and_solve_tsp_file(
+                File,
+                visualize=visualize,
+                normalize_coords=normalize_coords,
+                target_area_size=target_area_size
+            )
+        else:
+            print("Warning: Both File and points specified. File parameter takes precedence.")
+            return load_and_solve_tsp_file(
+                File,
+                visualize=visualize,
+                normalize_coords=normalize_coords,
+                target_area_size=target_area_size
+            )
+
+    # Validate points parameter if no file specified
+    if points is None or len(points) == 0:
+        raise ValueError("Either 'points' must be provided or 'File' parameter must specify a valid .tsp file path")
 
     #print(f"[DeBUG] Advanced TSP Solver - Processing {len(points)} points")
     start_time = time.time()
@@ -1591,51 +1971,95 @@ def advanced_tsp_solver(points, visualize=True, use_all_optimizations=True, real
         if not real_time_viz:
             visualizer.draw()
 
-    # Stage 2: Adaptive parameter tuning
-    print("Stage 4: Auto-tuning parameters...")
-    clustering_config, adaptive_kcand = adaptive_parameter_tuning(points, clusters)
+    # Check if comprehensive sector optimization was applied
+    sector_optimized = sector_optimization_info.get('total_sector_optimization_time', 0) > 0
 
-    # Stage 3: Enhanced sub-clustering
-    print("Stage 5: Enhanced sub-clustering...")
-    enhanced_clusters = []
-    for i, cluster in enumerate(clusters):
-        if len(cluster) > clustering_config.max_size:
-            subclusters = adaptive_subcluster_enhanced(points, cluster, clustering_config)
-            enhanced_clusters.extend(subclusters)
+    if not sector_optimized:
+        # Stage 2: Adaptive parameter tuning (only if sectors weren't optimized)
+        print("Stage 4: Auto-tuning parameters...")
+        clustering_config, adaptive_kcand = adaptive_parameter_tuning(points, clusters)
+
+        # Stage 3: Enhanced sub-clustering (only if sectors weren't optimized)
+        print("Stage 5: Enhanced sub-clustering...")
+        enhanced_clusters = []
+        for i, cluster in enumerate(clusters):
+            if len(cluster) > clustering_config.max_size:
+                subclusters = adaptive_subcluster_enhanced(points, cluster, clustering_config)
+                enhanced_clusters.extend(subclusters)
+            else:
+                enhanced_clusters.append(cluster)
+        clusters = enhanced_clusters
+        print(f"Sub-clustering complete: {len(clusters)} total clusters")
+
+        if visualizer:
+            visualizer.clusters = clusters
+            visualizer.cluster_colors = plt.cm.Set3(np.linspace(0, 1, len(clusters)))
+            visualizer.update_status(f" {len(clusters)} optimized clusters created")
+            visualizer.draw()
+
+        # Stage 4: Genetic algorithm for cluster ordering
+        print(f"Stage 6: Optimizing cluster order ({len(clusters)} clusters)...")
+        centroids = [(sum(points[i][0] for i in c)/len(c), sum(points[i][1] for i in c)/len(c)) for c in clusters]
+
+        if len(centroids) > 8 and len(centroids) <= 50:
+            print("Using genetic algorithm for cluster ordering...")
+            order, order_cost = genetic_cluster_order(centroids, max_time=3.0)
         else:
-            enhanced_clusters.append(cluster)
-    clusters = enhanced_clusters
-    print(f"Sub-clustering complete: {len(clusters)} total clusters")
+            print("Using nearest neighbor for cluster ordering...")
+            order, order_cost = solve_cluster_order(centroids)
+        print(f"Cluster order optimized with cost: {order_cost:.2f}")
 
-    if visualizer:
-        visualizer.clusters = clusters
-        visualizer.cluster_colors = plt.cm.Set3(np.linspace(0, 1, len(clusters)))
-        visualizer.update_status(f" {len(clusters)} optimized clusters created")
-        visualizer.draw()
+        # Stage 5: Parallel cluster solving
+        print("Stage 7: Solving cluster entry/exit points...")
+        if visualizer:
+            visualizer.update_status("Processing clusters...")
+        if len(clusters) > 4:
+            best_cost, seq = choose_entries_exits_parallel(points, D, clusters, order, Kcand=adaptive_kcand, visualizer=visualizer)
+        else:
+            best_cost, seq = choose_entries_exits(points, D, clusters, order, Kcand=adaptive_kcand, visualizer=visualizer)
 
-    # Stage 4: Genetic algorithm for cluster ordering
-    print(f"Stage 6: Optimizing cluster order ({len(clusters)} clusters)...")
-    centroids = [(sum(points[i][0] for i in c)/len(c), sum(points[i][1] for i in c)/len(c)) for c in clusters]
+        full_route = stitch_full_route(seq)
+        print(f"Initial route cost: {best_cost:.2f}")
 
-    if len(centroids) > 8 and len(centroids) <= 50:
-        print("Using genetic algorithm for cluster ordering...")
-        order, order_cost = genetic_cluster_order(centroids, max_time=3.0)
     else:
-        print("Using nearest neighbor for cluster ordering...")
-        order, order_cost = solve_cluster_order(centroids)
-    print(f"Cluster order optimized with cost: {order_cost:.2f}")
+        # Sectors were comprehensively optimized - use lightweight global connection
+        print("Stages 4-7: Skipped (comprehensive sector optimization completed)")
+        print("Stage 8: Lightweight inter-sector route connection...")
 
-    # Stage 5: Parallel cluster solving
-    print("Stage 7: Solving cluster entry/exit points...")
-    if visualizer:
-        visualizer.update_status("Processing clusters...")
-    if len(clusters) > 4:
-        best_cost, seq = choose_entries_exits_parallel(points, D, clusters, order, Kcand=adaptive_kcand, visualizer=visualizer)
-    else:
-        best_cost, seq = choose_entries_exits(points, D, clusters, order, Kcand=adaptive_kcand, visualizer=visualizer)
+        # Create a simple route by connecting sector routes
+        full_route = []
+        best_cost = 0
 
-    full_route = stitch_full_route(seq)
-    print(f"Initial route cost: {best_cost:.2f}")
+        if 'sector_routes' in sector_optimization_info:
+            sector_routes = sector_optimization_info['sector_routes']
+
+            # Simple concatenation of sector routes for now
+            # In practice, you'd want to optimize the connections between sectors
+            for sector_id in sorted(sector_routes.keys()):
+                sector_route = sector_routes[sector_id]['route']
+                if sector_route:
+                    if not full_route:
+                        full_route.extend(sector_route)
+                    else:
+                        # Connect to previous sector (remove duplicate connection points)
+                        full_route.extend(sector_route)
+                    best_cost += sector_routes[sector_id]['cost']
+
+            print(f"Inter-sector route connected: {best_cost:.2f} (sum of sector costs)")
+        else:
+            # Fallback to simple cluster concatenation
+            full_route = [i for cluster in clusters for i in cluster]
+            best_cost = 0  # Will be calculated later
+
+        # Light optimization of inter-sector connections
+        if len(full_route) > 3:
+            print("Optimizing inter-sector connections...")
+            from TSP import or_opt_optimization_fast
+            inter_cost, full_route = or_opt_optimization_fast(
+                D, full_route, max_segment_length=1, max_iterations=1
+            )
+            best_cost = inter_cost
+            print(f"Inter-sector optimization complete: {best_cost:.2f}")
 
     # Stage 6: Multi-level optimization
     print("Stage 8: Multi-level route optimization...")
@@ -1722,7 +2146,7 @@ def advanced_tsp_solver(points, visualize=True, use_all_optimizations=True, real
     return {
         "points": points,
         "clusters": clusters,
-        "order": order,
+        "order": order if 'order' in locals() else list(range(len(clusters))),
         "full_route": full_route,
         "cost": best_cost,
         "solve_time": solve_time,
@@ -1731,7 +2155,7 @@ def advanced_tsp_solver(points, visualize=True, use_all_optimizations=True, real
         "optimizations_used": {
             "adaptive_subclustering": True,
             "sector_level_or_opt": len(points) >= 100,
-            "genetic_cluster_order": len(centroids) > 8,
+            "genetic_cluster_order": 'centroids' in locals() and len(centroids) > 8,
             "parallel_processing": len(clusters) > 4,
             "lin_kernighan": True,
             "or_opt": True,
@@ -2532,18 +2956,103 @@ def demonstrate_scaling_benefit(test_sizes=[100, 250, 500, 1000], area_size=25):
     return results
 
 
+def test_tsp_file_solver(filepath, visualize=True, normalize_coords=True):
+    """
+    Test the TSP solver with a .tsp file.
+
+    Args:
+        filepath: Path to the .tsp file
+        visualize: Whether to show visualization
+        normalize_coords: Whether to normalize coordinates
+
+    Returns:
+        dict: Solver results
+    """
+    print(f"\n=== Testing TSP File Solver ===")
+    print(f"File: {filepath}")
+
+    try:
+        # Test using the File parameter
+        result = advanced_tsp_solver(
+            File=filepath,
+            visualize=visualize,
+            normalize_coords=normalize_coords,
+            use_all_optimizations=True,
+            real_time_viz=False
+        )
+
+        print(f"\n=== TSP File Test Results ===")
+        if 'tsp_metadata' in result:
+            metadata = result['tsp_metadata']
+            print(f"TSP Name: {metadata['name']}")
+            print(f"TSP Type: {metadata['type']}")
+            print(f"Edge Weight Type: {metadata['edge_weight_type']}")
+            print(f"Dimension: {metadata['dimension']}")
+
+        print(f"Points processed: {len(result.get('points', []))}")
+        print(f"Final cost: {result['cost']:.2f}")
+        print(f"Solve time: {result['solve_time']:.3f}s")
+        print(f"Clusters: {result['num_clusters']}")
+
+        if result.get('normalized', False):
+            print(f"Coordinates were normalized to improve solver performance")
+
+        return result
+
+    except Exception as e:
+        print(f"Error testing TSP file: {e}")
+        raise
+
+
+def create_sample_tsp_file(filepath, n_points=50, area_size=100):
+    """
+    Create a sample .tsp file for testing purposes.
+
+    Args:
+        filepath: Path where to save the .tsp file
+        n_points: Number of points to generate
+        area_size: Size of the area for point generation
+    """
+    print(f"Creating sample TSP file: {filepath}")
+
+    # Generate random points
+    random.seed(42)
+    points = [(random.uniform(0, area_size), random.uniform(0, area_size)) for _ in range(n_points)]
+
+    # Write TSP file
+    with open(filepath, 'w') as f:
+        f.write(f"NAME: sample_{n_points}\n")
+        f.write(f"COMMENT: Sample TSP file with {n_points} points\n")
+        f.write("TYPE: TSP\n")
+        f.write(f"DIMENSION: {n_points}\n")
+        f.write("EDGE_WEIGHT_TYPE: EUC_2D\n")
+        f.write("NODE_COORD_SECTION\n")
+
+        for i, (x, y) in enumerate(points, 1):
+            f.write(f"{i} {x:.6f} {y:.6f}\n")
+
+        f.write("EOF\n")
+
+    print(f"Sample TSP file created with {n_points} points")
+    return filepath
+
+
 if __name__ == "__main__":
-    # Test the new spatial subdivision approach
-    print("Enhanced TSP Solver with Spatial Subdivision")
-    
-    # Quick test    
-    test_spatial_subdivision_solver(n_points=2000, visualize=True)
+    # Test the enhanced TSP solver
+    print("Enhanced TSP Solver with Spatial Subdivision and TSP File Support")
+
+    # Quick test with generated points
+    #test_spatial_subdivision_solver(n_points=500, visualize=False)
+
+    # Test TSP file functionality
+    # sample_file = create_sample_tsp_file("sample_test.tsp", n_points=100)
+    # test_tsp_file_solver(sample_file, visualize=False)
 
     # Scaling demonstration
     # demonstrate_scaling_benefit([100, 250, 500, 1000])
 
-    # Original test for compatibility
-    # test_advanced_solver(n_points=250, visualize=False, area_size=25)
+    # Example usage with File parameter:
+    result = advanced_tsp_solver(File="./Tnm52.tsp", visualize=True)
 
     pass
-#Enhanced spatial subdivision TSP solver with hierarchical or-opt optimization for better scalability
+#Enhanced spatial subdivision TSP solver with hierarchical or-opt optimization and .tsp file support
