@@ -169,7 +169,7 @@ def load_and_solve_tsp_file(filepath, visualize=True, normalize_coords=True, tar
     Args:
         filepath: Path to the .tsp file
         visualize: Whether to show visualization
-        normalize_coords: Whether to normalize coordinates to target area size
+        normalize_coords: Whether to normalize coordinates for solver (recommended: True)
         target_area_size: Target area size for normalization
 
     Returns:
@@ -180,43 +180,190 @@ def load_and_solve_tsp_file(filepath, visualize=True, normalize_coords=True, tar
 
     try:
         # Parse the TSP file
-        points, metadata = parse_tsp_file(filepath)
+        original_points, metadata = parse_tsp_file(filepath)
 
-        # Normalize coordinates if requested
+        # Store original bounds for visualization
+        original_bounds = {
+            'min_x': min(p[0] for p in original_points),
+            'max_x': max(p[0] for p in original_points),
+            'min_y': min(p[1] for p in original_points),
+            'max_y': max(p[1] for p in original_points)
+        }
+
+        # Prepare points for solver
         if normalize_coords:
-            original_bounds = {
-                'min_x': min(p[0] for p in points),
-                'max_x': max(p[0] for p in points),
-                'min_y': min(p[1] for p in points),
-                'max_y': max(p[1] for p in points)
-            }
-            points = normalize_tsp_coordinates(points, target_area_size)
-            print(f"Coordinates normalized from {original_bounds} to ~{target_area_size}x{target_area_size}")
+            # Normalize coordinates for better solver performance
+            solver_points = normalize_tsp_coordinates(original_points, target_area_size)
+            print(f"Coordinates normalized from {original_bounds} to ~{target_area_size}x{target_area_size} for solver")
+        else:
+            solver_points = original_points
+            print(f"Using original coordinates for solving: bounds {original_bounds}")
+
+        # Create visualization points mapping
+        if visualize:
+            print("Visualization will use original coordinate scale for proper plotting")
 
         # Solve using the enhanced spatial subdivision solver
         start_time = time.time()
-        result = advanced_tsp_solver(points, visualize=visualize, use_all_optimizations=True, real_time_viz=False)
+        result = advanced_tsp_solver(
+            solver_points,
+            visualize=False,  # We'll handle visualization separately with proper coordinates
+            use_all_optimizations=True,
+            real_time_viz=False
+        )
         total_time = time.time() - start_time
+
+        # Recalculate cost using original coordinates if normalization was used
+        original_cost = result['cost']  # Cost from normalized solver
+        if normalize_coords and result.get('full_route'):
+            print("Recalculating cost using original coordinate scale...")
+            true_cost = recalculate_cost_original_coordinates(original_points, result['full_route'])
+            result['cost'] = true_cost
+            result['normalized_cost'] = original_cost  # Keep the normalized cost for reference
+            print(f"Cost corrected: {original_cost:.2f} (normalized) -> {true_cost:.2f} (original scale)")
+
+        # Handle visualization with original coordinates
+        if visualize and result.get('full_route'):
+            print("Creating visualization with original TSP coordinates...")
+            visualize_tsp_solution(original_points, result['full_route'], result['cost'], metadata)
 
         # Add TSP file metadata to results
         result['tsp_metadata'] = metadata
-        result['original_bounds'] = original_bounds if normalize_coords else None
+        result['original_bounds'] = original_bounds
+        result['original_points'] = original_points
+        result['solver_points'] = solver_points
         result['normalized'] = normalize_coords
         result['file_load_time'] = total_time - result['solve_time']
 
         print(f"\n=== TSP File Solution Results ===")
         print(f"File: {metadata['name']} ({metadata.get('comment', 'No comment')})")
-        print(f"Points: {len(points)}")
-        print(f"Final cost: {result['cost']:.2f}")
+        print(f"Points: {len(original_points)}")
+        print(f"Final cost: {result['cost']:.2f} (original coordinate scale)")
+        if normalize_coords and 'normalized_cost' in result:
+            print(f"Normalized cost: {result['normalized_cost']:.2f} (solver internal scale)")
         print(f"Solve time: {result['solve_time']:.3f}s")
         print(f"Total time (including file I/O): {total_time:.3f}s")
         print(f"Final clusters: {result['num_clusters']}")
+        print(f"Original coordinate bounds: {original_bounds}")
 
         return result
 
     except Exception as e:
         print(f"Error loading/solving TSP file: {e}")
         raise
+
+
+def visualize_tsp_solution(original_points, route, cost, metadata=None):
+    """
+    Create a visualization of the TSP solution using original coordinate scale.
+    This ensures proper plotting without coordinate distortion.
+
+    Args:
+        original_points: List of (x, y) coordinates in original scale
+        route: Solution route as list of point indices
+        cost: Total cost of the route
+        metadata: TSP file metadata (optional)
+    """
+    try:
+        import matplotlib.pyplot as plt
+
+        # Create figure with proper aspect ratio
+        fig, ax = plt.subplots(figsize=(12, 10))
+
+        # Get coordinate bounds
+        xs = [original_points[i][0] for i in route]
+        ys = [original_points[i][1] for i in route]
+
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        # Add some padding
+        padding_x = (max_x - min_x) * 0.05
+        padding_y = (max_y - min_y) * 0.05
+
+        ax.set_xlim(min_x - padding_x, max_x + padding_x)
+        ax.set_ylim(min_y - padding_y, max_y + padding_y)
+
+        # Plot points
+        all_xs = [p[0] for p in original_points]
+        all_ys = [p[1] for p in original_points]
+        ax.scatter(all_xs, all_ys, c='blue', s=30, alpha=0.7, zorder=2)
+
+        # Plot route
+        route_xs = [original_points[i][0] for i in route] + [original_points[route[0]][0]]
+        route_ys = [original_points[i][1] for i in route] + [original_points[route[0]][1]]
+        ax.plot(route_xs, route_ys, 'r-', linewidth=2, alpha=0.8, zorder=1)
+
+        # Highlight start and end points
+        start_point = original_points[route[0]]
+        end_point = original_points[route[-1]]
+        ax.scatter([start_point[0]], [start_point[1]], c='green', marker='s', s=120, label='Start', zorder=3)
+        ax.scatter([end_point[0]], [end_point[1]], c='red', marker='X', s=120, label='End', zorder=3)
+
+        # Set title and labels
+        title = f'TSP Solution'
+        if metadata:
+            title = f'TSP Solution: {metadata["name"]}'
+            if metadata.get('comment'):
+                title += f'\n{metadata["comment"]}'
+
+        title += f'\nCost: {cost:.2f}, Points: {len(original_points)}'
+
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel('X Coordinate', fontsize=12)
+        ax.set_ylabel('Y Coordinate', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_aspect('equal')
+
+        # Save the plot
+        output_file = "tsp_solution_original_coordinates.png"
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        print(f"TSP visualization saved to {output_file}")
+
+        # Try to show the plot
+        try:
+            plt.show()
+            plt.pause(2)
+        except:
+            print("Interactive display not available")
+
+        plt.close()
+
+    except Exception as e:
+        print(f"Warning: Could not create TSP visualization: {e}")
+
+
+def recalculate_cost_original_coordinates(original_points, route):
+    """
+    Recalculate the route cost using original coordinates instead of normalized ones.
+    This provides the true cost in the original coordinate system.
+
+    Args:
+        original_points: List of (x, y) coordinates in original scale
+        route: Solution route as list of point indices
+
+    Returns:
+        float: Total route cost in original coordinate system
+    """
+    if not route or len(route) < 2:
+        return 0.0
+
+    total_cost = 0.0
+
+    # Calculate distance for each segment in the route
+    for i in range(len(route)):
+        current_point = original_points[route[i]]
+        next_point = original_points[route[(i + 1) % len(route)]]  # Wrap around to complete the cycle
+
+        # Euclidean distance in original coordinates
+        dx = next_point[0] - current_point[0]
+        dy = next_point[1] - current_point[1]
+        distance = math.sqrt(dx * dx + dy * dy)
+        total_cost += distance
+
+    return total_cost
 
 
 def calculate_optimal_subdivision(points, max_nodes_per_sector=250):
@@ -3052,7 +3199,7 @@ if __name__ == "__main__":
     # demonstrate_scaling_benefit([100, 250, 500, 1000])
 
     # Example usage with File parameter:
-    result = advanced_tsp_solver(File="./Tnm52.tsp", visualize=True)
+    result = advanced_tsp_solver(File="./Tnm199.tsp", visualize=True)
 
     pass
 #Enhanced spatial subdivision TSP solver with hierarchical or-opt optimization and .tsp file support
